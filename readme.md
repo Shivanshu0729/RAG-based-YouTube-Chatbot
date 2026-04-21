@@ -1,4 +1,4 @@
-RAG-Based YouTube Video QA System
+RAG-Based Multilingual YouTube Video QA System
 
 A Retrieval-Augmented Generation (RAG) based application that enables users to interact with YouTube videos using natural language. The system extracts video transcripts, converts them into semantic embeddings, and generates context-aware answers using a Large Language Model.
 
@@ -20,22 +20,22 @@ Semantic search using FAISS vector database
 Real-time question answering
 Streamlit-based interactive UI
 Efficient document chunking and embedding
+Fast inference using Groq LLM
 Architecture
-YouTube Video
-      ↓
-Transcript Extraction
-      ↓
-Text Chunking
-      ↓
-Embeddings (HuggingFace)
-      ↓
-FAISS Vector Store
-      ↓
-Retriever
-      ↓
-LLM (Groq)
-      ↓
-Generated Answer
+flowchart TD
+    A[YouTube Video URL] --> B[Transcript Extraction]
+    B --> C[Text Chunking]
+    C --> D[Embeddings (HuggingFace)]
+    D --> E[FAISS Vector Store]
+    E --> F[Retriever]
+    F --> G[LLM (Groq - LLaMA 3.1)]
+    G --> H[Generated Answer]
+RAG Pipeline
+flowchart LR
+    Q[User Query] --> R[Retriever]
+    R --> C[Relevant Context]
+    C --> L[LLM]
+    L --> A[Final Answer]
 Tech Stack
 Python
 LangChain
@@ -81,7 +81,7 @@ Usage
 Enter a YouTube video URL
 Select output language (English or Hindi)
 Ask a question related to the video
-Receive an AI-generated answer
+Receive an AI-generated answer based on transcript context
 Key Components
 1. Transcript Loader
 
@@ -89,7 +89,7 @@ Extracts captions using YouTubeTranscriptAPI via LangChain.
 
 2. Text Processing
 
-Splits transcript into chunks for embedding.
+Splits transcript into manageable chunks for embedding.
 
 3. Embedding Model
 
@@ -97,7 +97,7 @@ Uses HuggingFace sentence-transformers for semantic encoding.
 
 4. Vector Database
 
-Stores embeddings using FAISS.
+Stores embeddings using FAISS for efficient similarity search.
 
 5. Retriever
 
@@ -108,20 +108,23 @@ Fetches relevant chunks based on user query.
 Uses Groq-hosted LLaMA model for answer generation.
 
 Performance Considerations
-Caching reduces recomputation
-Optimized chunk size improves retrieval
+Caching is used to avoid recomputation of embeddings
+Optimized chunk size improves retrieval accuracy
 Fast inference using Groq LLM
 Limitations
 Requires videos with available transcripts
 Performance depends on transcript quality
-Limited to supported caption languages
+Limited to languages supported by YouTube captions
 Future Improvements
-Multi-query retrieval
+Multi-query retrieval for improved recall
 Reranking using cross-encoders
-Timestamp-based answers
+Timestamp-based answer referencing
 Chat history support
 Multi-video querying
 Cloud deployment
+Security
+API keys are stored using environment variables
+Sensitive files are excluded via .gitignore
 Author
 
 Shivanshu Gangwar
