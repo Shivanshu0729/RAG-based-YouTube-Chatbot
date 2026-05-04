@@ -20,6 +20,8 @@ Semantic search using FAISS vector database
 Real-time question answering
 Streamlit-based interactive UI
 Efficient document chunking and embedding
+Robust transcript loading with retries and fallback subtitle sources
+YouTube rate-limit handling with temporary cooldowns
 Architecture
 YouTube Video
       ↓
@@ -40,7 +42,7 @@ Tech Stack
 Python
 LangChain
 FAISS (Vector Database)
-HuggingFace Embeddings (all-MiniLM-L6-v2)
+HuggingFace Embeddings (all-MiniLM-L6-v2, langchain-huggingface)
 Groq LLM (LLaMA 3.1)
 Streamlit
 YouTube Transcript API
@@ -111,10 +113,13 @@ Performance Considerations
 Caching reduces recomputation
 Optimized chunk size improves retrieval
 Fast inference using Groq LLM
+
 Limitations
 Requires videos with available transcripts
 Performance depends on transcript quality
 Limited to supported caption languages
+Very aggressive YouTube rate limiting may require waiting before retrying
+
 Future Improvements
 Multi-query retrieval
 Reranking using cross-encoders
