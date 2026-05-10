@@ -22,6 +22,9 @@ except ImportError:
 load_dotenv()
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
+COOKIES_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cookies.txt")
+COOKIES_AVAILABLE = os.path.exists(COOKIES_PATH)
+
 st.set_page_config(
     page_title="YT Insight — AI Video Chat",
     layout="centered",
@@ -112,7 +115,6 @@ html, body, [class*="css"] {
     display: block;
 }
 
-/* Force Streamlit's own markdown containers to center too */
 .yt-hero p,
 .yt-hero .yt-subtitle,
 [data-testid="stMarkdownContainer"] .yt-subtitle,
@@ -128,41 +130,6 @@ html, body, [class*="css"] {
     height: 1px;
     background: linear-gradient(90deg, transparent, #2D2A40 30%, #2D2A40 70%, transparent);
     margin: 0 0 2rem;
-}
-
-.yt-panel {
-    background: #12111A;
-    border: 1px solid #1E1C2E;
-    border-radius: 16px;
-    padding: 1.75rem;
-    margin-bottom: 1.25rem;
-    position: relative;
-    overflow: hidden;
-}
-.yt-panel::after {
-    content: '';
-    position: absolute;
-    top: 0; left: 0; right: 0;
-    height: 1px;
-    background: linear-gradient(90deg, transparent, rgba(255,255,255,0.06), transparent);
-}
-
-.yt-label {
-    font-size: 10.5px;
-    font-weight: 500;
-    letter-spacing: 0.14em;
-    text-transform: uppercase;
-    color: #4A4860;
-    margin-bottom: 0.6rem;
-    display: flex;
-    align-items: center;
-    gap: 8px;
-}
-.yt-label::before {
-    content: '';
-    display: inline-block;
-    width: 16px; height: 1px;
-    background: #4A4860;
 }
 
 .stTextInput > div > div > input,
@@ -199,7 +166,6 @@ html, body, [class*="css"] {
     box-shadow: 0 0 0 3px rgba(255, 45, 85, 0.1) !important;
 }
 
-/* Pointer cursor on all interactive parts of the selectbox */
 .stSelectbox,
 .stSelectbox *,
 .stSelectbox > div,
@@ -338,6 +304,7 @@ st.text_input(
     key="video_url",
     label_visibility="visible",
 )
+
 col1, col2 = st.columns([1, 2], gap="medium")
 
 with col1:
@@ -353,27 +320,8 @@ with col2:
         placeholder="What is this video about?",
         label_visibility="visible",
     )
+
 ask = st.button("Ask AI →")
-
-@st.cache_resource
-def process_video(url):
-    try:
-        video_id = extract_video_id(url)
-        transcript_text = load_transcript_text(video_id)
-        if not transcript_text:
-            return None, "Transcript text was empty for this video."
-
-        splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-        chunks = splitter.split_text(transcript_text)
-
-        if not chunks:
-            return None, "Transcript could not be split into searchable chunks."
-
-        embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
-        vector_store = FAISS.from_texts(chunks, embeddings)
-        return vector_store, None
-    except Exception as error:
-        return None, str(error)
 
 
 def extract_video_id(url):
@@ -385,7 +333,6 @@ def extract_video_id(url):
     if parsed_url.hostname and "youtube.com" in parsed_url.hostname:
         if parsed_url.path == "/watch":
             return parse_qs(parsed_url.query).get("v", [""])[0]
-
         if parsed_url.path.startswith(("/shorts/", "/embed/")):
             parts = parsed_url.path.split("/")
             return parts[2] if len(parts) > 2 else ""
@@ -394,84 +341,104 @@ def extract_video_id(url):
     return match.group(1) if match else ""
 
 
-def load_transcript_text(video_id):
-    if not video_id:
-        raise ValueError("Please provide a valid YouTube URL.")
-
-    cooldown_error = get_rate_limit_cooldown_error(video_id)
-    if cooldown_error:
-        raise ValueError(cooldown_error)
-
-    try:
-        return load_transcript_text_from_api(video_id)
-    except Exception as primary_error:
-        try:
-            return load_transcript_text_with_ytdlp(video_id)
-        except Exception as fallback_error:
-            if is_rate_limit_error(primary_error) or is_rate_limit_error(fallback_error):
-                set_rate_limit_cooldown(video_id)
-                raise ValueError(
-                    "YouTube is rate limiting requests (HTTP 429). Please wait 1-2 minutes and try again."
-                ) from fallback_error
-            raise
-
-
-def get_rate_limit_cooldown_error(video_id):
-    cooldowns = st.session_state.get("yt_rate_limit_cooldowns", {})
-    cooldown_until = cooldowns.get(video_id)
-
-    if not cooldown_until:
-        return None
-
-    remaining_seconds = int(cooldown_until - time.time())
-    if remaining_seconds <= 0:
-        cooldowns.pop(video_id, None)
-        st.session_state["yt_rate_limit_cooldowns"] = cooldowns
-        return None
-
-    remaining_minutes = max(1, (remaining_seconds + 59) // 60)
-    return f"YouTube is rate limiting requests (HTTP 429). Please wait about {remaining_minutes} minute(s) and try again."
-
-
-def set_rate_limit_cooldown(video_id, cooldown_seconds=120):
-    cooldowns = st.session_state.get("yt_rate_limit_cooldowns", {})
-    cooldowns[video_id] = time.time() + cooldown_seconds
-    st.session_state["yt_rate_limit_cooldowns"] = cooldowns
-
-
 def is_rate_limit_error(error):
     if isinstance(error, HTTPError) and error.code == 429:
         return True
-    return "429" in str(error)
+    err_str = str(error).lower()
+    return "429" in err_str or "rate limit" in err_str or "too many requests" in err_str
 
 
 def backoff_delay_seconds(attempt):
     return (2 ** attempt) + random.uniform(0, 0.5)
 
 
-def load_transcript_text_from_api(video_id, max_attempts=4):
+def get_rate_limit_cooldown_error(video_id):
+    cooldowns = st.session_state.get("yt_rate_limit_cooldowns", {})
+    cooldown_until = cooldowns.get(video_id)
+    if not cooldown_until:
+        return None
+    remaining_seconds = int(cooldown_until - time.time())
+    if remaining_seconds <= 0:
+        cooldowns.pop(video_id, None)
+        st.session_state["yt_rate_limit_cooldowns"] = cooldowns
+        return None
+    remaining_minutes = max(1, (remaining_seconds + 59) // 60)
+    return f"YouTube is rate limiting requests. Please wait about {remaining_minutes} minute(s) and try again."
+
+
+def set_rate_limit_cooldown(video_id, cooldown_seconds=90):
+    cooldowns = st.session_state.get("yt_rate_limit_cooldowns", {})
+    cooldowns[video_id] = time.time() + cooldown_seconds
+    st.session_state["yt_rate_limit_cooldowns"] = cooldowns
+
+
+def remove_html_tags(text):
+    result = ""
+    inside_tag = False
+    for ch in text:
+        if ch == "<":
+            inside_tag = True
+        elif ch == ">":
+            inside_tag = False
+        elif not inside_tag:
+            result += ch
+    return result
+
+
+def remove_curly_braces(text):
+    parts = text.split("{")
+    cleaned = parts[0]
+    for part in parts[1:]:
+        if "}" in part:
+            cleaned += part.split("}", 1)[1]
+        else:
+            cleaned += part
+    return cleaned
+
+
+def is_timestamp_line(text):
+    if len(text) >= 5 and text[0].isdigit() and text[1].isdigit() and text[2] == ":" and text[3].isdigit() and text[4].isdigit():
+        return True
+    return False
+
+
+def load_transcript_via_api(video_id, max_attempts=3):
     last_error = None
+    cookie_kwargs = {"cookies": COOKIES_PATH} if COOKIES_AVAILABLE else {}
 
     for attempt in range(max_attempts):
         try:
-            transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+            transcript_list = YouTubeTranscriptApi.list_transcripts(video_id, **cookie_kwargs)
 
             transcript = None
             try:
                 transcript = transcript_list.find_transcript(["en", "hi"])
             except Exception:
-                for candidate in transcript_list:
-                    transcript = candidate
-                    break
+                try:
+                    for lang in transcript_list._manually_created_transcripts:
+                        transcript = transcript_list._manually_created_transcripts[lang]
+                        break
+                except Exception:
+                    pass
+
+                if transcript is None:
+                    for candidate in transcript_list:
+                        transcript = candidate
+                        break
 
             if transcript is None:
                 raise ValueError("No transcript track was found for this video.")
 
             transcript_chunks = transcript.fetch()
-            text = " ".join(chunk["text"] for chunk in transcript_chunks if chunk.get("text"))
-            if text.strip():
+            text = " ".join(
+                chunk.get("text", "") if isinstance(chunk, dict) else getattr(chunk, "text", "")
+                for chunk in transcript_chunks
+            ).strip()
+
+            if text:
                 return text
             raise ValueError("Transcript text was empty after fetching captions.")
+
         except Exception as error:
             last_error = error
             if is_rate_limit_error(error) and attempt < max_attempts - 1:
@@ -482,107 +449,197 @@ def load_transcript_text_from_api(video_id, max_attempts=4):
     raise last_error
 
 
-def load_transcript_text_with_ytdlp(video_id):
-    video_url = f"https://www.youtube.com/watch?v={video_id}"
-
-    ydl_opts = {
-        "quiet": True,
-        "skip_download": True,
-        "writesubtitles": True,
-        "writeautomaticsub": True,
-        "subtitleslangs": ["en", "hi"],
-    }
-
-    info = None
+def _ytdlp_extract(video_url, ydl_opts, max_attempts=3):
     last_error = None
-    for attempt in range(4):
+    for attempt in range(max_attempts):
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(video_url, download=False)
-            break
+                return ydl.extract_info(video_url, download=False)
         except Exception as error:
             last_error = error
-            if is_rate_limit_error(error) and attempt < 3:
+            if is_rate_limit_error(error) and attempt < max_attempts - 1:
                 time.sleep(backoff_delay_seconds(attempt))
                 continue
-            raise
-
-    if info is None and last_error is not None:
-        raise last_error
-
-    subtitle_sets = [info.get("subtitles") or {}, info.get("automatic_captions") or {}]
-
-    for subtitle_set in subtitle_sets:
-        subtitle_url = pick_subtitle_url(subtitle_set)
-        if subtitle_url:
-            return subtitle_url_to_text(subtitle_url)
-
-    raise ValueError("No usable subtitle track was found for this video.")
+            break
+    return None
 
 
-def pick_subtitle_url(subtitle_set):
-    preferred_languages = ["en", "en-US", "en-GB", "hi"]
-
-    for language_code in preferred_languages:
-        tracks = subtitle_set.get(language_code)
+def _pick_subtitle_url(subtitle_set):
+    preferred = ["en", "en-US", "en-GB", "hi", "en-IN"]
+    for lang in preferred:
+        tracks = subtitle_set.get(lang)
         if tracks:
-            return tracks[0].get("url")
-
-    for tracks in subtitle_set.values():
+            return tracks[0].get("url", "")
+    for lang in subtitle_set:
+        if "en" in lang.lower():
+            tracks = subtitle_set.get(lang)
+            if tracks:
+                return tracks[0].get("url", "")
+    for lang in sorted(subtitle_set):
+        tracks = subtitle_set.get(lang)
         if tracks:
-            return tracks[0].get("url")
-
+            return tracks[0].get("url", "")
     return ""
 
 
-def subtitle_url_to_text(subtitle_url):
-    request = urllib.request.Request(
+def _subtitle_url_to_text(subtitle_url):
+    req = urllib.request.Request(
         subtitle_url,
         headers={
-            "User-Agent": "Mozilla/5.0",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
             "Accept-Language": "en-US,en;q=0.9",
         },
     )
-
-    subtitle_content = ""
-    last_error = None
-    for attempt in range(4):
+    for attempt in range(3):
         try:
-            with urllib.request.urlopen(request) as response:
-                subtitle_content = response.read().decode("utf-8", errors="ignore")
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                raw = resp.read().decode("utf-8", errors="ignore")
             break
         except Exception as error:
-            last_error = error
-            if is_rate_limit_error(error) and attempt < 3:
+            if is_rate_limit_error(error) and attempt < 2:
                 time.sleep(backoff_delay_seconds(attempt))
                 continue
             raise
 
-    if not subtitle_content and last_error is not None:
-        raise last_error
+    cleaned = []
+    for line in raw.splitlines():
+        s = line.strip()
 
-    cleaned_lines = []
-    for line in subtitle_content.splitlines():
-        stripped_line = line.strip()
-        if not stripped_line:
+        if not s:
             continue
-        if stripped_line == "WEBVTT":
+        if s in ("WEBVTT", "NOTE"):
             continue
-        if stripped_line.isdigit():
+        if s.isdigit():
             continue
-        if "-->" in stripped_line:
+        if "-->" in s:
             continue
-        if stripped_line.startswith("NOTE"):
+        if is_timestamp_line(s):
+            continue
+        if s.startswith("STYLE") or s.startswith("Style:") or s.startswith("NOTE "):
             continue
 
-        cleaned_line = re.sub(r"<[^>]+>", "", stripped_line)
-        cleaned_lines.append(html.unescape(cleaned_line))
+        s = remove_html_tags(s)
+        s = remove_curly_braces(s)
+        s = html.unescape(s)
+        s = " ".join(s.split())
 
-    transcript_text = " ".join(cleaned_lines)
-    if not transcript_text.strip():
-        raise ValueError("Subtitle track was found but no text could be extracted.")
+        if s:
+            cleaned.append(s)
 
-    return transcript_text
+    result = " ".join(cleaned).strip()
+    if not result:
+        raise ValueError("Subtitle track contained no extractable text.")
+    return result
+
+
+def load_transcript_via_ytdlp(video_id):
+    video_url = f"https://www.youtube.com/watch?v={video_id}"
+
+    def build_opts(extra=None):
+        opts = {
+            "quiet": True,
+            "no_warnings": True,
+            "skip_download": True,
+            "writesubtitles": True,
+            "writeautomaticsub": True,
+            "subtitleslangs": ["en", "hi", "en-US", "en-GB"],
+            "socket_timeout": 30,
+        }
+        if COOKIES_AVAILABLE:
+            opts["cookiefile"] = COOKIES_PATH
+        if extra:
+            opts.update(extra)
+        return opts
+
+    info = _ytdlp_extract(video_url, build_opts(), max_attempts=2)
+
+    if info is None and not COOKIES_AVAILABLE:
+        try:
+            info = _ytdlp_extract(video_url, build_opts({"cookiesfrombrowser": ("chrome",)}), max_attempts=1)
+        except Exception:
+            pass
+
+    if info is None and not COOKIES_AVAILABLE:
+        try:
+            info = _ytdlp_extract(video_url, build_opts({"cookiesfrombrowser": ("firefox",)}), max_attempts=1)
+        except Exception:
+            pass
+
+    if info is None:
+        raise ValueError("yt-dlp could not retrieve video information.")
+
+    subtitle_sets = [info.get("subtitles") or {}, info.get("automatic_captions") or {}]
+    for subtitle_set in subtitle_sets:
+        subtitle_url = _pick_subtitle_url(subtitle_set)
+        if subtitle_url:
+            try:
+                text = _subtitle_url_to_text(subtitle_url)
+                if text.strip():
+                    return text
+            except Exception:
+                continue
+
+    raise ValueError("No usable subtitle track was found via yt-dlp.")
+
+
+def load_transcript_text(video_id):
+    if not video_id:
+        raise ValueError("Please provide a valid YouTube URL.")
+
+    cooldown_error = get_rate_limit_cooldown_error(video_id)
+    if cooldown_error:
+        raise ValueError(cooldown_error)
+
+    primary_error = None
+    try:
+        return load_transcript_via_api(video_id)
+    except Exception as err:
+        primary_error = err
+
+    fallback_error = None
+    try:
+        return load_transcript_via_ytdlp(video_id)
+    except Exception as err:
+        fallback_error = err
+
+    if is_rate_limit_error(primary_error) or is_rate_limit_error(fallback_error):
+        set_rate_limit_cooldown(video_id)
+        raise ValueError(
+            "YouTube is blocking requests from this app (HTTP 429).\n\n"
+            "To fix this:\n"
+            "1. Export cookies.txt from Chrome using 'Get cookies.txt LOCALLY' extension\n"
+            "2. Place cookies.txt in the same folder as app.py\n"
+            "3. Restart the app"
+        )
+
+    raise ValueError(
+        "Could not load transcript. Please check:\n"
+        "• The video URL is valid and the video is public\n"
+        "• The video has captions or subtitles enabled\n"
+        "• The video is not age-restricted\n\n"
+        f"Details: {fallback_error or primary_error}"
+    )
+
+
+@st.cache_resource
+def process_video(url):
+    try:
+        video_id = extract_video_id(url)
+        transcript_text = load_transcript_text(video_id)
+        if not transcript_text:
+            return None, "Transcript text was empty for this video."
+
+        splitter = RecursiveCharacterTextSplitter(chunk_size=1500, chunk_overlap=400)
+        chunks = splitter.split_text(transcript_text)
+
+        if not chunks:
+            return None, "Transcript could not be split into searchable chunks."
+
+        embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+        vector_store = FAISS.from_texts(chunks, embeddings)
+        return vector_store, None
+    except Exception as error:
+        return None, str(error)
 
 
 video_url = st.session_state.get("video_url", "")
@@ -603,32 +660,31 @@ if video_url:
     """, unsafe_allow_html=True)
 
     if ask and query:
-        retriever = vector_store.as_retriever()
+        retriever = vector_store.as_retriever(search_kwargs={"k": 6})
 
         with st.spinner("Thinking…"):
             docs = retriever.invoke(query)
             context = " ".join([doc.page_content for doc in docs])
-
             lang_instruction = "Answer in Hindi." if language == "Hindi" else "Answer in English."
 
-            final_prompt = f"""
-Answer the question based only on the context provided. Be concise and clear.
+            final_prompt = f"""You are given a transcript from a YouTube video. Answer the question using only the information present in the transcript below. Do not say where something starts or give timestamps. Just explain what the transcript says about the topic directly.
 
 {lang_instruction}
 
-Context:
+Transcript:
 {context}
 
 Question:
-{query}
-"""
+{query}"""
+
             llm = ChatGroq(model="llama-3.1-8b-instant", groq_api_key=GROQ_API_KEY)
             response = llm.invoke(final_prompt)
 
+        answer_html = response.content.replace("\n", "<br>")
         st.markdown(f"""
         <div class="answer-card">
             <div class="answer-tag">AI Answer</div>
-            <div class="answer-text">{response.content}</div>
+            <div class="answer-text">{answer_html}</div>
         </div>
         """, unsafe_allow_html=True)
 
